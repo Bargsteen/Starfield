@@ -1,60 +1,77 @@
 module Main where
 
-import Linear.V2 (V2(V2))
-import System.Random
+import           Linear.V2       (V2 (V2))
 
-import Helm
-import Helm.Color
-import Helm.Engine.SDL (SDLEngine)
-import Helm.Graphics2D
+import           Helm
+import           Helm.Color
+import           Helm.Engine.SDL (SDLEngine)
+import           Helm.Graphics2D
 
-import qualified Helm.Cmd as Cmd
-import qualified Helm.Time as Time
+import qualified Helm.Cmd        as Cmd
 import qualified Helm.Engine.SDL as SDL
+import qualified Helm.Time       as Time
 
-data Action = Idle | Tick
-newtype Star = Star (V2 Double)
+import qualified System.Random   as Rand
+
+type Chance = Double
+data Action = Idle | Tick | MaybeNewStar Chance | NewStar Star
+data Star = Star {prevPos :: V2 Double, pos :: V2 Double, vel :: V2 Double}
 newtype Model = Model [Star]
-newtype SpeedFactor = SpeedFactor Int
 
-
-initial :: [Star] -> (Model, Cmd SDLEngine Action)
-initial stars = (Model stars, Cmd.none)
+initial :: (Model, Cmd SDLEngine Action)
+initial = (Model [], Cmd.none)
 
 update :: Model -> Action -> (Model, Cmd SDLEngine Action)
 update model Idle = (model, Cmd.none)
-update (Model stars) Tick = ( Model $ map (moveAwayFrom wCenter (SpeedFactor 2)) stars, Cmd.none)
-  where wCenter = V2 0 0 -- Center in translated coordinate system
+update (Model stars) Tick = (Model $ filter starOutOfSight $ map (applyVelocity . addForceAwayFromCenter 0.01) stars, Cmd.execute genChance MaybeNewStar)
+update model (MaybeNewStar chance) = if chance >= 0.3 then (model, Cmd.execute genStar NewStar) else (model, Cmd.none)
+update (Model stars) (NewStar newStar) = (Model (newStar:stars), Cmd.none)
+
 
 subscriptions :: Sub SDLEngine Action
 subscriptions = Time.every Time.millisecond $ const Tick
 
 view :: Model -> Graphics SDLEngine
-view (Model stars) = Graphics2D $ collage $ fmap (\(Star pos) -> move (translateToCenter pos) $ filled (rgb 1 1 1) $ circle 5) stars
+view (Model stars) = Graphics2D $ collage $ fmap (\star -> move (translateToCenter (pos star)) $ filled (rgb 1 1 1) $ circle (size star)) stars
   where
-    halfWSize = windowSize / 2
     translateToCenter = translate (V2 halfWSize halfWSize)
+    distFromCenterToCorner = mag $ (V2 halfWSize halfWSize) - screenCenter
+    size star = min 10 $ normalizeToRange (0, distFromCenterToCorner) (0.1, 6) $ mag $ pos star - screenCenter
+    screenCenter = V2 0 0
 
 
 main :: IO ()
 main = do
   engine <- SDL.startupWith engineConfig
 
-  g <- newStdGen
-  let randomVals = randomRs (-halfWSize, halfWSize) g
-  let stars = zipWith (\x y -> Star (V2 x y)) (take 100 randomVals) ((take 100 . drop 100) randomVals)
-
   run engine GameConfig
-    { initialFn       = initial stars
+    { initialFn       = initial
     , updateFn        = update
     , subscriptionsFn = subscriptions
     , viewFn          = view
     }
-  where halfWSize = windowSize / 2
+
+type LowerLimit = Double
+type UpperLimit = Double
+
+genChance :: IO Chance
+genChance = head <$> genRandomDoubles (0,1)
+
+genRandomDoubles :: (LowerLimit, UpperLimit) -> IO [Double]
+genRandomDoubles (l, u) = Rand.randomRs (l, u) <$> Rand.newStdGen
+
+genStar :: IO Star
+genStar = do
+  randomDoubles <- genRandomDoubles (-halfWSize, halfWSize)
+  let (x, y) = (head randomDoubles, randomDoubles !! 1)
+  return (Star (V2 x y) (V2 x y) (V2 0 0))
 
 
 windowSize :: Double
 windowSize = 800
+
+halfWSize :: Double
+halfWSize = windowSize / 2
 
 engineConfig :: SDL.SDLEngineConfig
 engineConfig = SDL.SDLEngineConfig (V2 wSize wSize) False False "Starfield"
@@ -63,15 +80,47 @@ engineConfig = SDL.SDLEngineConfig (V2 wSize wSize) False False "Starfield"
 translate :: V2 Double -> V2 Double -> V2 Double
 translate a b = a + b
 
-moveAwayFrom :: V2 Double -> SpeedFactor -> Star -> Star
-moveAwayFrom from (SpeedFactor sf) (Star pos@(V2 x y)) = Star newPos
+
+type Factor = Double
+
+starOutOfSight :: Star -> Bool
+starOutOfSight star = x >= lowerBuffer && x <= upperBuffer && y >= lowerBuffer && y <=  upperBuffer
   where
-    hws = windowSize / 2
-    newPos = pos + vMult (pos - from) 0.01
+    (V2 x y) = pos star
+    lowerBuffer = (-halfWSize) - 20
+    upperBuffer = halfWSize + 20
 
 
-vPow :: (Num a, Integral b) => V2 a -> b -> V2 a
-vPow (V2 x y) f = V2 (x ^ f) (y ^ f)
+addForceAwayFromCenter :: Factor -> Star -> Star
+addForceAwayFromCenter factor star = addForce awayForce star
+  where
+    from = V2 0 0
+    awayForce = vMult factor $ pos star - from
 
-vMult :: (Num a) => V2 a -> a -> V2 a
-vMult (V2 x y) m = V2 (x*m) (y*m)
+addForce :: V2 Double -> Star -> Star
+addForce f s = Star (prevPos s) (pos s) vel'
+  where
+    vel' = vel s + f
+
+applyVelocity :: Star -> Star
+applyVelocity s = Star prevPos' pos' vel'
+  where
+    prevPos' = pos s
+    vel' = vel s
+    pos' = prevPos' + vel'
+
+vMult :: (Num a) => a -> V2 a -> V2 a
+vMult m (V2 x y) = V2 (x*m) (y*m)
+
+mag :: (Floating a) => V2 a -> a
+mag (V2 x y) = sqrt $ (x^2) + (y^2)
+
+
+type Value = Double
+type FromBottom = Double
+type FromTop = Double
+type ToBottom = Double
+type ToTop = Double
+
+normalizeToRange :: (FromBottom, FromTop) -> (ToBottom, ToTop) -> Value -> Value
+normalizeToRange (fb, ft) (tb, tt) val = tb + (tt - tb) * ((val - fb) / (ft - fb))
