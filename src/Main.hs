@@ -8,37 +8,48 @@ import           Helm.Engine.SDL (SDLEngine)
 import           Helm.Graphics2D
 
 import qualified Helm.Cmd        as Cmd
+import qualified Helm.Sub        as Sub
 import qualified Helm.Engine.SDL as SDL
 import qualified Helm.Time       as Time
+import qualified Helm.Mouse      as Mouse
 
 import qualified System.Random   as Rand
 
-type Chance = Double
-data Action = Idle | Tick | MaybeNewStar Chance | NewStar Star
+type Count = Int
+data Action = Idle | Tick | MaybeNewStars Count | NewStars [Star] | MouseMoved (V2 Int)
 data Star = Star {prevPos :: V2 Double, pos :: V2 Double, vel :: V2 Double}
-newtype Model = Model [Star]
+type Speed = Double
+data Model = Model [Star] Speed
 
 initial :: (Model, Cmd SDLEngine Action)
-initial = (Model [], Cmd.none)
+initial = (Model [] 0.01, Cmd.none)
 
 update :: Model -> Action -> (Model, Cmd SDLEngine Action)
 update model Idle = (model, Cmd.none)
-update (Model stars) Tick = (Model $ filter starOutOfSight $ map (applyVelocity . addForceAwayFromCenter 0.01) stars, Cmd.execute genChance MaybeNewStar)
-update model (MaybeNewStar chance) = if chance >= 0.3 then (model, Cmd.execute genStar NewStar) else (model, Cmd.none)
-update (Model stars) (NewStar newStar) = (Model (newStar:stars), Cmd.none)
-
+update (Model stars speed) Tick = (Model (filter starOutOfSight $ map (applyVelocity . addForceAwayFromCenter speed) stars) speed, Cmd.execute (genCount 0 50) MaybeNewStars)
+update model (MaybeNewStars count) = (model, Cmd.execute (genStars count) NewStars)
+update (Model stars speed) (NewStars newStars) = (Model (newStars ++ stars) speed, Cmd.none)
+update (Model stars _) (MouseMoved (V2 x _)) = (Model stars $ normalizeToRange (0, windowSize) (0.0000001, 0.05) (fromIntegral x), Cmd.none)
 
 subscriptions :: Sub SDLEngine Action
-subscriptions = Time.every Time.millisecond $ const Tick
+subscriptions = Sub.batch [ Time.every Time.millisecond $ const Tick
+                          , Mouse.moves MouseMoved
+                          ]
 
 view :: Model -> Graphics SDLEngine
-view (Model stars) = Graphics2D $ collage $ fmap (\star -> move (translateToCenter (pos star)) $ filled (rgb 1 1 1) $ circle (size star)) stars
+view (Model stars _) = Graphics2D $ collage [background, lineForms]
   where
     translateToCenter = translate (V2 halfWSize halfWSize)
-    distFromCenterToCorner = mag $ (V2 halfWSize halfWSize) - screenCenter
+    distFromCenterToCorner = mag $ V2 halfWSize halfWSize - screenCenter
     size star = min 10 $ normalizeToRange (0, distFromCenterToCorner) (0.1, 6) $ mag $ pos star - screenCenter
     screenCenter = V2 0 0
-
+    white = rgb 1 1 1
+    darkGrey = rgb 0.1 0.1 0.1
+    red = rgb 1 0 0
+    background = toForm $ collage $ pure $ move (translateToCenter screenCenter) $ filled darkGrey $ square windowSize
+    oldStarForms = toForm $ collage $ fmap (\star -> move (translateToCenter $ prevPos star) $ filled red $ circle (size star)) stars
+    starForms = toForm $ collage $ fmap (\star -> move (translateToCenter (pos star)) $ filled white $ circle (size star)) stars
+    lineForms = toForm $ collage $ fmap (\star -> move (translateToCenter screenCenter) $ traced (solid white) $ Path [prevPos star, pos star]) stars
 
 main :: IO ()
 main = do
@@ -53,18 +64,19 @@ main = do
 
 type LowerLimit = Double
 type UpperLimit = Double
+type MinCount = Int
+type MaxCount = Int
 
-genChance :: IO Chance
-genChance = head <$> genRandomDoubles (0,1)
+genCount :: MinCount -> MaxCount -> IO Count
+genCount minCount maxCount = head . Rand.randomRs (minCount, maxCount) <$> Rand.newStdGen
 
-genRandomDoubles :: (LowerLimit, UpperLimit) -> IO [Double]
-genRandomDoubles (l, u) = Rand.randomRs (l, u) <$> Rand.newStdGen
 
-genStar :: IO Star
-genStar = do
-  randomDoubles <- genRandomDoubles (-halfWSize, halfWSize)
-  let (x, y) = (head randomDoubles, randomDoubles !! 1)
-  return (Star (V2 x y) (V2 x y) (V2 0 0))
+genRandomDoubles :: LowerLimit -> UpperLimit -> IO [Double]
+genRandomDoubles l u = Rand.randomRs (l, u) <$> Rand.newStdGen
+
+genStars :: Count -> IO [Star]
+genStars count =
+  take count . fmap (\(x, y) -> Star (V2 x y) (V2 x y) (V2 0 0)) . toPairs <$> genRandomDoubles (-halfWSize) halfWSize
 
 
 windowSize :: Double
@@ -124,3 +136,9 @@ type ToTop = Double
 
 normalizeToRange :: (FromBottom, FromTop) -> (ToBottom, ToTop) -> Value -> Value
 normalizeToRange (fb, ft) (tb, tt) val = tb + (tt - tb) * ((val - fb) / (ft - fb))
+
+
+toPairs :: [a] -> [(a,a)]
+toPairs [] = []
+toPairs [_] = []
+toPairs (x:y:xs) = (x, y) : toPairs xs
